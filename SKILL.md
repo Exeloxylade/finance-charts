@@ -67,6 +67,15 @@ Each chart goes in its own `<g>` so you can fade the whole chart in and out betw
 | `FC.counter` | a big number counting up | `(el, from, to, start, end, fmt)` |
 
 ## Rules
+- World Bank: `--country "IDN;KOR;MYS"` now gives one series per country (dates `YYYY-01-01`, so `FC.line`
+  can parse them). The API is slow (15-25 s per call) and often 502s; the script asks one country at a
+  time and retries. For a ranking of ALL countries, fetch `country/all/indicator/<code>?date=2024&per_page=400`
+  once (PowerShell `Invoke-WebRequest -TimeoutSec 120` worked when Python timed out) and drop aggregates
+  with `api.worldbank.org/v2/country?per_page=400` (aggregates have `region.id == "NA"`).
+  Some series have no data for a country (Indonesia tax % GDP is empty) - check before you write the script.
+- Hide a chart's `<g>`/`<svg>` until its `start`: `FC.line` shows end dots at the left edge and `FC.bars`
+  shows its zero line before the draw begins. Gate opacity with `ramp(t, start-0.4, start)`.
+  Tested in `videos\indo-poor` (61 s, -14.7 LUFS).
 - Real numbers only. The voice says the same number the chart shows. Round once, the same way.
 - Every chart prints its source (`data.source`, e.g. "Source: Yahoo Finance") in the corner while it is on screen.
 - One red. The series the story is about is red and thickest; the rest are grey/black.

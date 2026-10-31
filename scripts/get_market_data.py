@@ -19,7 +19,7 @@ Shape:  {"source": "...", "series": [{"id","label","points":[["2024-09-30", 100.
 --weekly   : keep one point per week (smaller, smoother lines for a 30 s shot).
 The 'source' string is what you print on screen: e.g. "Source: Yahoo Finance".
 """
-import argparse, json, os, sys, urllib.request
+import argparse, json, os, sys, time, urllib.request
 
 
 def write(out, name, data):
@@ -68,17 +68,39 @@ def yahoo(a):
             "end": a.end, "rebased": a.rebase, "series": out}
 
 
-def worldbank(a):
-    url = ("https://api.worldbank.org/v2/country/%s/indicator/%s?format=json&date=%s:%s&per_page=200"
-           % (a.country, a.indicator, a.start, a.end))
+def _wb_get(iso, a):
+    # One country per request: multi-country and per_page queries often time out / 502.
+    url = ("https://api.worldbank.org/v2/country/%s/indicator/%s?format=json&date=%s:%s"
+           % (iso, a.indicator, a.start, a.end))
     req = urllib.request.Request(url, headers={"User-Agent": "finance-charts/1.0"})
-    j = json.loads(urllib.request.urlopen(req, timeout=60).read())
-    rows = [r for r in (j[1] or []) if r.get("value") is not None]
+    for attempt in range(6):
+        try:
+            j = json.loads(urllib.request.urlopen(req, timeout=30).read())
+            return [r for r in ((j[1] if len(j) > 1 else None) or []) if r.get("value") is not None]
+        except Exception as e:
+            if attempt == 5:
+                print("  FAILED", iso, e, file=sys.stderr)
+                return []
+            print("  retry", iso, attempt + 1, e, file=sys.stderr)
+            time.sleep(2 * (attempt + 1))
+
+
+def worldbank(a):
+    rows = []
+    for iso in [c.strip() for c in a.country.split(";") if c.strip()]:
+        rows += _wb_get(iso, a)
     rows.sort(key=lambda r: r["date"])
-    pts = [[r["date"], float(r["value"])] for r in rows]
-    label = rows[0]["indicator"]["value"] if rows else a.indicator
-    return {"source": "Source: World Bank", "kind": "worldbank", "series":
-            [summarise(a.indicator, label, pts)] if pts else []}
+    # --country "IDN;MYS;CHN" -> one series per country (id = ISO3), dates as YYYY-01-01
+    # so FC.line can parse them.
+    by = {}
+    for r in rows:
+        iso = r.get("countryiso3code") or r["country"]["id"]
+        by.setdefault(iso, {"name": r["country"]["value"], "pts": []})["pts"].append(
+            [r["date"] + "-01-01", float(r["value"])])
+    order = [c.strip().upper() for c in a.country.split(";")]
+    series = [summarise(iso, by[iso]["name"], by[iso]["pts"]) for iso in order if iso in by]
+    ind = rows[0]["indicator"]["value"] if rows else a.indicator
+    return {"source": "Source: World Bank", "kind": "worldbank", "indicator": ind, "series": series}
 
 
 def main():
