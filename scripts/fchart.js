@@ -43,18 +43,21 @@
     const all = S.flatMap((s) => s.pts);
     const x = d3.scaleTime().domain(d3.extent(all, (p) => p[0])).range([cfg.x, cfg.x + cfg.w]);
     const yd = cfg.yDomain || d3.extent(all, (p) => p[1]);
-    const pad = (yd[1] - yd[0]) * 0.08;
-    const y = d3.scaleLinear().domain([yd[0] - pad, yd[1] + pad]).nice(cfg.yTicks || 4).range([cfg.y + cfg.h, cfg.y]);
+    const pad = (yd[1] - yd[0]) * (cfg.pad == null ? 0.08 : cfg.pad);
+    const y = d3.scaleLinear().domain([yd[0] - pad, yd[1] + pad]); if (cfg.pad !== 0) y.nice(cfg.yTicks || 4); y.range([cfg.y + cfg.h, cfg.y]);
     const yFmt = cfg.yFormat || ((v) => FC.num(v));
     // grid + y labels
     const axis = mk("g", {}, g);
-    y.ticks(cfg.yTicks || 4).forEach((v) => {
+    const AS = cfg.axisSize || 20;
+    (cfg.yTickValues || y.ticks(cfg.yTicks || 4)).forEach((v) => {
       mk("line", { x1: cfg.x, x2: cfg.x + cfg.w, y1: y(v), y2: y(v), stroke: T.grid, "stroke-width": 1 }, axis);
-      txt(yFmt(v), { x: cfg.x - 14, y: y(v) + 7, "text-anchor": "end", fill: T.sub, "font-size": 20 }, axis);
+      txt(yFmt(v), { x: cfg.x - (cfg.yLabelGap || 14), y: y(v) + AS * 0.35, "text-anchor": "end", fill: T.sub, "font-size": AS }, axis);
     });
+    if (cfg.baseline) mk("line", { x1: cfg.x, x2: cfg.x + cfg.w, y1: cfg.y + cfg.h + (cfg.baselineDy || 0), y2: cfg.y + cfg.h + (cfg.baselineDy || 0), stroke: T.sub, "stroke-width": 2 }, axis);
     const xFmt = cfg.xFormat || d3.timeFormat("%b %Y");
-    x.ticks(cfg.xTicks || 4).forEach((d) => {
-      txt(xFmt(d), { x: x(d), y: cfg.y + cfg.h + 34, "text-anchor": "middle", fill: T.sub, "font-size": 20 }, axis);
+    const xTV = cfg.xTickValues ? cfg.xTickValues.map(([d, l]) => [parse(d), l]) : x.ticks(cfg.xTicks || 4).map((d) => [d, xFmt(d)]);
+    xTV.forEach(([d, l]) => {
+      txt(l, { x: x(d), y: cfg.y + cfg.h + (cfg.xLabelDy || 34), "text-anchor": "middle", fill: T.xInk || T.sub, "font-size": AS }, axis);
     });
     if (cfg.base != null)
       mk("line", { x1: cfg.x, x2: cfg.x + cfg.w, y1: y(cfg.base), y2: y(cfg.base), stroke: T.sub,
@@ -71,22 +74,33 @@
       return { a, ag, bg, label, d: parse(a.date) };
     });
     // series
-    const lineGen = d3.line().x((p) => x(p[0])).y((p) => y(p[1])).curve(d3.curveMonotoneX);
-    const areaGen = d3.area().x((p) => x(p[0])).y0(cfg.y + cfg.h).y1((p) => y(p[1])).curve(d3.curveMonotoneX);
+    // cfg.curve: "smooth" (default) | "linear" (raw daily jaggedness, reads as real data)
+    const crv = cfg.curve === "linear" ? d3.curveLinear : d3.curveMonotoneX;
+    const lineGen = d3.line().x((p) => x(p[0])).y((p) => y(p[1])).curve(crv);
+    const areaGen = d3.area().x((p) => x(p[0])).y0(cfg.y + cfg.h).y1((p) => y(p[1])).curve(crv);
+    // draw order: series with a later start sit on top only if listed later; put the hero last.
     const drawn = S.map((s, i) => {
       const area = cfg.area && i === 0 ? mk("path", { fill: s.color, opacity: 0.12 }, g) : null;
       const path = mk("path", { fill: "none", stroke: s.color, "stroke-width": s.width || 4,
                                 "stroke-linejoin": "round", "stroke-linecap": "round" }, g);
-      const dot = mk("circle", { r: 7, fill: s.color, opacity: 0 }, g);
-      const lab = txt("", { fill: s.color, "font-size": 24, "font-weight": 800, opacity: 0 }, g);
+      // cfg.marker: "dot" (default, filled) | "ring" (hollow circle on the paper colour)
+      const ring = cfg.marker === "ring";
+      const dot = mk("circle", { r: ring ? 9 : 7, fill: ring ? T.bg : s.color, stroke: s.color,
+                                 "stroke-width": ring ? 3.5 : 0, opacity: 0 }, g);
+      const lab = txt("", { fill: s.color, "font-size": cfg.labelSize || 24, "font-weight": 800, opacity: 0 }, g);
       return { s, area, path, dot, lab };
     });
     const x0 = x.domain()[0].getTime(), x1 = x.domain()[1].getTime();
     return { x, y, draw(t) {
       const p = FC.ramp(t, cfg.start, cfg.end);
-      const cut = x0 + (x1 - x0) * p;
+      let cut = x0 + (x1 - x0) * p;
       axis.setAttribute("opacity", FC.ramp(t, cfg.start - 0.6, cfg.start).toFixed(3));
       drawn.forEach((D) => {
+        // a series may have its own start/end (e.g. the index line arrives later)
+        const ps = D.s.start != null ? FC.ramp(t, D.s.start, D.s.end) : p;
+        cut = x0 + (x1 - x0) * ps;
+        if (ps <= 0) { D.path.setAttribute("d", ""); D.dot.setAttribute("opacity", 0);
+          D.lab.setAttribute("opacity", 0); if (D.area) D.area.setAttribute("d", ""); return; }
         const pts = [];
         for (let k = 0; k < D.s.pts.length; k++) {
           const q = D.s.pts[k];
@@ -105,14 +119,17 @@
         if (cfg.endLabels !== false) {
           const vl = D.s.valueLabel ? D.s.valueLabel(h[1], D.s) : yFmt(h[1]);
           D.lab.textContent = (D.s.label ? D.s.label + " " : "") + vl;
-          D.lab.setAttribute("x", hx + 14); D.lab.setAttribute("y", hy + 8 + (D.s.labelDy || 0));
-          D.lab.setAttribute("opacity", FC.ramp(t, cfg.start + 0.3, cfg.start + 0.8).toFixed(3));
+          D.lab.setAttribute("x", hx + (cfg.labelDx || 14)); D.lab.setAttribute("y", hy + 8 + (D.s.labelDy || 0));
+          // cfg.labelAtEnd: show the label only once the line is fully drawn (cleaner, no moving text)
+          const s0 = D.s.start != null ? D.s.start : cfg.start, e0 = D.s.end != null ? D.s.end : cfg.end;
+          D.lab.setAttribute("opacity", (cfg.labelAtEnd ? FC.ramp(t, e0, e0 + 0.35)
+                                                         : FC.ramp(t, s0 + 0.3, s0 + 0.8)).toFixed(3));
         }
       });
       // keep end labels apart: sort by y, push down any label closer than 32px to the one above
       const labs = drawn.filter((D) => D.lab.getAttribute("opacity") !== "0" && D.lab.textContent)
         .map((D) => ({ D, y: +D.lab.getAttribute("y") })).sort((a, b) => a.y - b.y);
-      for (let k = 1; k < labs.length; k++) if (labs[k].y - labs[k - 1].y < 32) labs[k].y = labs[k - 1].y + 32;
+      for (let k = 1; k < labs.length; k++) if (labs[k].y - labs[k - 1].y < (cfg.labelGap || 32)) labs[k].y = labs[k - 1].y + (cfg.labelGap || 32);
       labs.forEach((L) => L.D.lab.setAttribute("y", L.y.toFixed(1)));
       ann.forEach((A) => {
         const on = cut >= A.d.getTime() ? 1 : 0;
